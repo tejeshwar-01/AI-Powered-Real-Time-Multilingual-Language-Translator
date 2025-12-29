@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>🎙 AI Translator</title>
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  background: #f2f4f8;
+  margin: 0;
+  padding: 0;
+}
+.container {
+  max-width: 500px;
+  margin: auto;
+  padding: 20px;
+}
+h2 {
+  text-align: center;
+}
+textarea, select, button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px;
+  font-size: 16px;
+}
+button {
+  background: #4f46e5;
+  color: white;
+  border: none;
+  border-radius: 6px;
+}
+button:disabled {
+  background: #aaa;
+}
+.toggle {
+  margin-top: 10px;
+}
+.status {
+  margin-top: 10px;
+  text-align: center;
+  font-weight: bold;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+  <h2>🎙 AI Translator</h2>
+
+  <textarea id="textInput" rows="4" placeholder="Type or speak..."></textarea>
+
+  <select id="targetLang">
+    <option value="fr">French</option>
+    <option value="hi">Hindi</option>
+    <option value="es">Spanish</option>
+    <option value="de">German</option>
+  </select>
+
+  <div class="toggle">
+    <label>
+      <input type="checkbox" id="fastTts" checked />
+      ⚡ Faster TTS (gTTS)
+    </label>
+  </div>
+
+  <button onclick="translateAndSpeak()">🔊 Translate & Speak</button>
+  <button onclick="startRecording()">🎤 Start Recording</button>
+
+  <div class="status" id="status">Ready</div>
+</div>
+
+<script src="/static/script.js"></script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
