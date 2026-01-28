@@ -1,4 +1,11 @@
-import os, uuid, shutil, torch, whisper, asyncio
+import os
+import uuid
+import shutil
+import asyncio
+import subprocess
+import torch
+import whisper
+
 from fastapi import FastAPI, WebSocket, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -7,6 +14,7 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 # ================= APP =================
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,6 +24,7 @@ app.add_middleware(
 
 # ================= DEVICE =================
 device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.set_grad_enabled(False)
 print("🚀 Device:", device)
 
 # ================= MODELS =================
@@ -24,6 +33,7 @@ whisper_model = whisper.load_model("base", device=device)
 MODEL_NAME = "facebook/m2m100_418M"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 translator = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(device)
+translator.eval()
 
 # ================= FRONTEND =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,66 +46,149 @@ def index():
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 # ================= HELPERS =================
-def detect_lang(text):
-    return "hi" if any(c in text for c in "अआइईउऊ") else "en"
+def convert_to_wav(input_path: str, output_path: str):
+    """
+    Converts any audio to 16kHz mono WAV (Whisper compatible)
+    """
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-ar", "16000",
+            "-ac", "1",
+            output_path
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-def translate_text(text, tgt):
-    tokenizer.src_lang = detect_lang(text)
+async def whisper_transcribe(path: str):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, whisper_model.transcribe, path)
+
+def translate_text(text: str, src_lang: str, tgt_lang: str = "fr"):
+    tokenizer.src_lang = src_lang
     inputs = tokenizer(text, return_tensors="pt").to(device)
-    tgt_id = tokenizer.get_lang_id(tgt)
-    with torch.no_grad():
-        out = translator.generate(**inputs, forced_bos_token_id=tgt_id)
-    return tokenizer.decode(out[0], skip_special_tokens=True)
+    tgt_id = tokenizer.get_lang_id(tgt_lang)
 
-# ================= MODE 3 — MIC FIX =================
+    with torch.no_grad():
+        output = translator.generate(
+            **inputs,
+            forced_bos_token_id=tgt_id,
+            max_length=128
+        )
+
+    return tokenizer.decode(output[0], skip_special_tokens=True)
+
+# ================= MODE 3 — FILE SPEECH TO TEXT =================
 @app.post("/speech-to-text")
 async def speech_to_text(file: UploadFile = File(...)):
-    path = f"tmp_{uuid.uuid4()}.wav"
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    result = whisper_model.transcribe(path)
-    os.remove(path)
-    return {"text": result["text"]}
+    raw_path = f"raw_{uuid.uuid4()}"
+    wav_path = f"{raw_path}.wav"
+
+    try:
+        with open(raw_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        convert_to_wav(raw_path, wav_path)
+        result = await whisper_transcribe(wav_path)
+
+        return {
+            "text": result["text"],
+            "language": result["language"]
+        }
+
+    finally:
+        for p in [raw_path, wav_path]:
+            if os.path.exists(p):
+                os.remove(p)
 
 # ================= MODE 1 — LIVE SUBTITLES =================
 @app.websocket("/ws/subtitles")
 async def subtitles_ws(ws: WebSocket):
     await ws.accept()
+
+    audio_buffer = bytearray()
+
     try:
         while True:
-            data = await ws.receive_bytes()
-            path = f"chunk_{uuid.uuid4()}.wav"
-            with open(path, "wb") as f:
-                f.write(data)
+            chunk = await ws.receive_bytes()
+            audio_buffer.extend(chunk)
 
-            text = whisper_model.transcribe(path)["text"]
-            translated = translate_text(text, "fr")
+            # Transcribe every ~5 seconds
+            if len(audio_buffer) < 16000 * 2 * 2:
+                continue
 
-            await ws.send_json({
-                "original": text,
-                "translated": translated
-            })
-            os.remove(path)
-    except:
+            raw_path = f"raw_{uuid.uuid4()}"
+            wav_path = f"{raw_path}.wav"
+
+            try:
+                with open(raw_path, "wb") as f:
+                    f.write(audio_buffer)
+
+                convert_to_wav(raw_path, wav_path)
+                result = await whisper_transcribe(wav_path)
+
+                text = result["text"]
+                src_lang = result["language"]
+                translated = translate_text(text, src_lang, "fr")
+
+                await ws.send_json({
+                    "original": text,
+                    "translated": translated,
+                    "language": src_lang
+                })
+
+                audio_buffer.clear()
+
+            finally:
+                for p in [raw_path, wav_path]:
+                    if os.path.exists(p):
+                        os.remove(p)
+
+    except Exception:
         await ws.close()
 
-# ================= MODE 2 — FULL SPEECH-TO-SPEECH =================
+# ================= MODE 2 — SPEECH TO SPEECH =================
 @app.websocket("/ws/speech")
 async def speech_ws(ws: WebSocket):
     await ws.accept()
+
+    audio_buffer = bytearray()
+
     try:
         while True:
-            data = await ws.receive_bytes()
-            path = f"audio_{uuid.uuid4()}.wav"
-            with open(path, "wb") as f:
-                f.write(data)
+            chunk = await ws.receive_bytes()
+            audio_buffer.extend(chunk)
 
-            text = whisper_model.transcribe(path)["text"]
-            translated = translate_text(text, "fr")
+            if len(audio_buffer) < 16000 * 2 * 5:
+                continue
 
-            await ws.send_json({
-                "text": translated
-            })
-            os.remove(path)
-    except:
+            raw_path = f"raw_{uuid.uuid4()}"
+            wav_path = f"{raw_path}.wav"
+
+            try:
+                with open(raw_path, "wb") as f:
+                    f.write(audio_buffer)
+
+                convert_to_wav(raw_path, wav_path)
+                result = await whisper_transcribe(wav_path)
+
+                text = result["text"]
+                src_lang = result["language"]
+                translated = translate_text(text, src_lang, "fr")
+
+                await ws.send_json({
+                    "text": translated,
+                    "language": src_lang
+                })
+
+                audio_buffer.clear()
+
+            finally:
+                for p in [raw_path, wav_path]:
+                    if os.path.exists(p):
+                        os.remove(p)
+
+    except Exception:
         await ws.close()
